@@ -38,11 +38,8 @@ class _HistoryScreenState extends State<HistoryScreen> {
             ?? heladeras.first;
 
         final cutoff = DateTime.now().subtract(Duration(hours: _hoursBack));
-        // Solo mostrar datos de la sesión actual (desde que el sensor empezó a emitir)
-        final sessionStart = widget.mqtt.sessionStart(selectedId);
         final filtered = heladeraState.history
             .where((r) => r.timestamp.isAfter(cutoff))
-            .where((r) => sessionStart == null || r.timestamp.isAfter(sessionStart))
             .toList();
         final temps = filtered.map((r) => r.temperatura).toList();
         final events = _buildEventLog(filtered);

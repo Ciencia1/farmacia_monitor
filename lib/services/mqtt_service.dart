@@ -48,7 +48,8 @@ class MqttService extends ChangeNotifier {
         if (diff > 120 && hs.sensorOnline) {
           _updateHeladeraState(h.id, (s) => s.copyWith(sensorOnline: false));
           if (_wasEverOnline[h.id] == true) {
-            NotificationService().showDeviceDisconnected(h.nombre);
+            final mins = (diff / 60).round();
+            NotificationService().showDeviceDisconnectedMins(h.nombre, mins);
           }
           debugPrint("Watchdog: ${h.id} sin datos por ${diff}s -> offline");
         }
@@ -411,13 +412,21 @@ class MqttService extends ChangeNotifier {
               .toList();
           // Cargar historial para la grafica pero NO mostrar temperatura
           // ni marcar online hasta recibir datos reales
-          newStates.add(hs.copyWith(
-            history: list,
-            lastReading: null,   // sin valor hasta recibir dato real
-            debugPrint('ARRANQUE: ${hs.heladera.id} lastReading seteado a null'),
-            sensorOnline: false, // sin señal hasta recibir dato real
-            lastUpdate: null,
-          ));
+         
+         
+   
+
+          debugPrint('ARRANQUE: ${hs.heladera.id} lastReading seteado a null');
+newStates.add(hs.copyWith(
+  history: list,
+  lastReading: null,
+  sensorOnline: false,
+  lastUpdate: null,
+));
+
+
+
+
         } else {
           newStates.add(hs);
         }

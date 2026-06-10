@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'config.dart';
 import 'models/temp_reading.dart';
 import 'services/mqtt_service.dart';
@@ -7,6 +8,7 @@ import 'services/notification_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/history_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/pin_screen.dart';
 import 'theme/app_theme.dart';
 import 'widgets/widgets.dart';
 
@@ -40,8 +42,91 @@ class FarmaciaApp extends StatelessWidget {
       title: AppConfig.farmaciaName,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark,
-      home: MainShell(mqtt: mqtt),
+      home: PinGate(mqtt: mqtt),
     );
+  }
+}
+
+// ── Controla si mostrar PIN o app principal ───────────
+class PinGate extends StatefulWidget {
+  final MqttService mqtt;
+  const PinGate({super.key, required this.mqtt});
+
+  @override
+  State<PinGate> createState() => _PinGateState();
+}
+
+class _PinGateState extends State<PinGate> with WidgetsBindingObserver {
+  bool _pinVerificado = false;
+  bool _tienePin = false;
+  bool _loading = true;
+  DateTime? _ultimaVerificacion;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _verificarPin();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Si pasaron más de 5 minutos en background → pedir PIN de nuevo
+      if (_ultimaVerificacion != null && _tienePin) {
+        final diff = DateTime.now().difference(_ultimaVerificacion!).inMinutes;
+        if (diff >= 5) {
+          setState(() => _pinVerificado = false);
+        }
+      }
+    } else if (state == AppLifecycleState.paused) {
+      _ultimaVerificacion = DateTime.now();
+    }
+  }
+
+  Future<void> _verificarPin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pin = prefs.getString('app_pin') ?? '';
+    setState(() {
+      _tienePin = pin.isNotEmpty;
+      _loading = false;
+    });
+  }
+
+  void _onPinSuccess() {
+    setState(() {
+      _pinVerificado = true;
+      _ultimaVerificacion = DateTime.now();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        backgroundColor: AppTheme.bgDark,
+        body: Center(child: CircularProgressIndicator(color: AppTheme.tempOk)),
+      );
+    }
+
+    // Sin PIN configurado → mostrar setup
+    if (!_tienePin) {
+      return PinScreen(isSetup: true, onSuccess: _onPinSuccess);
+    }
+
+    // PIN configurado pero no verificado → pedir PIN
+    if (!_pinVerificado) {
+      return PinScreen(isSetup: false, onSuccess: _onPinSuccess);
+    }
+
+    // PIN verificado → mostrar app
+    return MainShell(mqtt: widget.mqtt);
   }
 }
 

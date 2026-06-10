@@ -47,7 +47,7 @@ class NotificationService {
   }
 
   Future<void> showTempAlert(double temp, String heladeraName) async {
-    final key = 'temp_${temp < AppConfig.tempMin ? "cold" : "hot"}';
+    final key = 'temp_${temp < AppConfig.tempMin ? "cold" : "hot"}_$heladeraName';
     if (!_canNotify(key)) return;
     _lastAlertTime[key] = DateTime.now();
 
@@ -99,7 +99,23 @@ class NotificationService {
     await _plugin.show(
       3,
       '📡 Sin señal — $heladeraName',
-      'El dispositivo lleva más de ${AppConfig.disconnectNotifMinutes} minutos sin enviar datos. Verificar conexión.',
+      'El dispositivo lleva más de ${AppConfig.disconnectNotifMinutes} minutos sin enviar datos.',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'farmacia_alerts', 'Alertas de Temperatura',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+        ),
+      ),
+    );
+  }
+
+  Future<void> showDeviceDisconnectedMins(String heladeraName, int mins) async {
+    await _plugin.show(
+      3,
+      '📡 Sin señal — $heladeraName',
+      'El dispositivo lleva $mins minuto${mins == 1 ? "" : "s"} sin enviar datos. Verificar conexión.',
       const NotificationDetails(
         android: AndroidNotificationDetails(
           'farmacia_alerts', 'Alertas de Temperatura',
