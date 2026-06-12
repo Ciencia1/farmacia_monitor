@@ -1,5 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/temp_reading.dart';
 import '../services/mqtt_service.dart';
 import '../theme/app_theme.dart';
@@ -16,7 +20,111 @@ class HistoryScreen extends StatefulWidget {
 
 class _HistoryScreenState extends State<HistoryScreen> {
   int _hoursBack = 6;
+  int _semanasReporte = 1;
   String? _selectedHeladeraId;
+
+  // Datos desde API
+  List<TempReading> _apiReadings = [];
+  Map<String, dynamic>? _apiStats;
+  bool _loadingApi = false;
+  bool _usandoApi = false;
+  String? _apiError;
+  bool _enviandoReporte = false;
+
+  static const String _apiBase = 'http://168.75.110.69:5000';
+
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  Future<void> _cargarDesdeApi(String heladeraId) async {
+    setState(() { _loadingApi = true; _apiError = null; });
+    try {
+      final semanas = (_hoursBack / 168).ceil().clamp(1, 4);
+      final uri = Uri.parse(
+        '$_apiBase/historial?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&semanas=$semanas'
+      );
+      final res = await http.get(uri).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final data = json.decode(res.body);
+        final List<dynamic> datos = data['datos'];
+        final readings = datos.map((d) => TempReading(
+          temperatura: (d['temp'] as num).toDouble(),
+          timestamp: DateTime.parse(d['time']).toLocal(),
+          heladeraId: heladeraId,
+          cliente: AppConfig.mqttUser,
+        )).toList();
+
+        // Stats
+        final statsUri = Uri.parse(
+          '$_apiBase/estadisticas?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&semanas=$semanas'
+        );
+        final statsRes = await http.get(statsUri).timeout(const Duration(seconds: 10));
+        Map<String, dynamic>? stats;
+        if (statsRes.statusCode == 200) {
+          stats = json.decode(statsRes.body);
+        }
+
+        setState(() {
+          _apiReadings = readings;
+          _apiStats = stats;
+          _usandoApi = true;
+          _loadingApi = false;
+        });
+      } else {
+        throw Exception('Error ${res.statusCode}');
+      }
+    } catch (e) {
+      setState(() {
+        _apiError = 'No se pudo conectar al servidor';
+        _loadingApi = false;
+        _usandoApi = false;
+      });
+    }
+  }
+
+  Future<void> _solicitarReporte(String heladeraId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString('email_reportes') ?? '';
+    if (email.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Configurá un email en Ajustes primero'),
+            backgroundColor: AppTheme.tempDanger,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() => _enviandoReporte = true);
+    try {
+      final topic = 'farmacias/${AppConfig.mqttUser}/config/reporte_ahora';
+      final payload = MqttClientPayloadBuilder();
+      payload.addString(json.encode({
+        'email': email,
+        'heladera': heladeraId,
+        'semanas': _semanasReporte,
+      }));
+      widget.mqtt.publishMessage(topic, payload);
+
+      await Future.delayed(const Duration(seconds: 1));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Reporte solicitado — llegará a $email en unos segundos'),
+            backgroundColor: AppTheme.tempOk,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _enviandoReporte = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -32,27 +140,35 @@ class _HistoryScreenState extends State<HistoryScreen> {
           );
         }
 
-        // Seleccionar primera heladera por defecto
         final selectedId = _selectedHeladeraId ?? heladeras.first.heladera.id;
-        final heladeraState = widget.mqtt.state.getHeladera(selectedId)
-            ?? heladeras.first;
+        final heladeraState = widget.mqtt.state.getHeladera(selectedId) ?? heladeras.first;
 
+        // Usar datos de API si están disponibles, sino historial local
         final cutoff = DateTime.now().subtract(Duration(hours: _hoursBack));
-        final filtered = heladeraState.history
+        final localFiltered = heladeraState.history
             .where((r) => r.timestamp.isAfter(cutoff))
             .toList();
+        final filtered = _usandoApi ? _apiReadings : localFiltered;
         final temps = filtered.map((r) => r.temperatura).toList();
         final events = _buildEventLog(filtered);
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
           children: [
+
             // ── Selector de heladera ───────────────────
             if (heladeras.length > 1) ...[
               _HeladeraSelector(
                 heladeras: heladeras.map((h) => h.heladera).toList(),
                 selectedId: selectedId,
-                onSelect: (id) => setState(() => _selectedHeladeraId = id),
+                onSelect: (id) {
+                  setState(() {
+                    _selectedHeladeraId = id;
+                    _usandoApi = false;
+                    _apiReadings = [];
+                    _apiStats = null;
+                  });
+                },
               ),
               const SizedBox(height: 10),
             ],
@@ -60,8 +176,109 @@ class _HistoryScreenState extends State<HistoryScreen> {
             // ── Selector de rango temporal ─────────────
             _TimeRangeSelector(
               selected: _hoursBack,
-              onSelect: (h) => setState(() => _hoursBack = h),
+              onSelect: (h) {
+                setState(() {
+                  _hoursBack = h;
+                  _usandoApi = false;
+                  _apiReadings = [];
+                  _apiStats = null;
+                });
+              },
             ),
+            const SizedBox(height: 10),
+
+            // ── Botones API y Reporte ──────────────────
+            Row(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: _loadingApi ? null : () => _cargarDesdeApi(selectedId),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _usandoApi
+                            ? AppTheme.tempOk.withOpacity(0.15)
+                            : AppTheme.bgCard,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: _usandoApi
+                              ? AppTheme.tempOk.withOpacity(0.4)
+                              : AppTheme.border,
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (_loadingApi)
+                            const SizedBox(
+                              width: 14, height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2, color: AppTheme.tempOk),
+                            )
+                          else
+                            Icon(
+                              _usandoApi
+                                  ? Icons.cloud_done_rounded
+                                  : Icons.cloud_download_outlined,
+                              color: _usandoApi ? AppTheme.tempOk : AppTheme.textSecondary,
+                              size: 16,
+                            ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _usandoApi ? 'Servidor ✓' : 'Cargar servidor',
+                            style: TextStyle(
+                              color: _usandoApi ? AppTheme.tempOk : AppTheme.textSecondary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: GestureDetector(
+                    onTap: _enviandoReporte ? null : () => _mostrarDialogoReporte(context, selectedId),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppTheme.bgCard,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppTheme.border, width: 0.5),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (_enviandoReporte)
+                            const SizedBox(
+                              width: 14, height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2, color: AppTheme.tempOk),
+                            )
+                          else
+                            const Icon(Icons.email_outlined,
+                                color: AppTheme.textSecondary, size: 16),
+                          const SizedBox(width: 6),
+                          const Text('Pedir reporte',
+                              style: TextStyle(
+                                  color: AppTheme.textSecondary, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
+            if (_apiError != null) ...[
+              const SizedBox(height: 8),
+              Text(_apiError!,
+                  style: TextStyle(
+                      color: AppTheme.tempDanger.withOpacity(0.8),
+                      fontSize: 11)),
+            ],
             const SizedBox(height: 12),
 
             // ── Gráfico ────────────────────────────────
@@ -74,15 +291,41 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 border: Border.all(color: AppTheme.border, width: 0.5),
               ),
               child: filtered.isEmpty
-                  ? const Center(
-                      child: Text('Sin datos para el período',
-                          style: TextStyle(color: AppTheme.textMuted)))
+                  ? Center(
+                      child: Text(
+                        _usandoApi ? 'Sin datos del servidor' : 'Sin datos para el período',
+                        style: const TextStyle(color: AppTheme.textMuted),
+                      ))
                   : TempHistoryChart(readings: filtered),
             ),
             const SizedBox(height: 12),
 
             // ── Stats ──────────────────────────────────
-            if (temps.isNotEmpty)
+            if (_usandoApi && _apiStats != null && _apiStats!['ok'] == true)
+              Row(
+                children: [
+                  Expanded(child: StatCard(
+                    label: 'Promedio',
+                    value: '${_apiStats!['promedio']}°C',
+                    icon: Icons.analytics_outlined,
+                  )),
+                  const SizedBox(width: 8),
+                  Expanded(child: StatCard(
+                    label: 'Mínima',
+                    value: '${_apiStats!['minima']}°C',
+                    icon: Icons.arrow_downward_rounded,
+                    valueColor: AppTheme.tempCold,
+                  )),
+                  const SizedBox(width: 8),
+                  Expanded(child: StatCard(
+                    label: 'Máxima',
+                    value: '${_apiStats!['maxima']}°C',
+                    icon: Icons.arrow_upward_rounded,
+                    valueColor: AppTheme.tempDanger,
+                  )),
+                ],
+              )
+            else if (temps.isNotEmpty)
               Row(
                 children: [
                   Expanded(child: StatCard(
@@ -116,8 +359,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     style: TextStyle(color: AppTheme.textMuted,
                         fontSize: 10, letterSpacing: 0.1)),
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
                     color: events.isEmpty
                         ? AppTheme.tempOk.withOpacity(0.1)
@@ -127,9 +369,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   child: Text(
                     events.isEmpty ? 'Sin eventos' : '${events.length}',
                     style: TextStyle(
-                      color: events.isEmpty
-                          ? AppTheme.tempOk
-                          : AppTheme.tempDanger,
+                      color: events.isEmpty ? AppTheme.tempOk : AppTheme.tempDanger,
                       fontSize: 11, fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -152,8 +392,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                               color: AppTheme.tempOk, size: 32),
                           SizedBox(height: 8),
                           Text('Sin eventos en el período',
-                              style: TextStyle(
-                                  color: AppTheme.textSecondary)),
+                              style: TextStyle(color: AppTheme.textSecondary)),
                         ]),
                       ),
                     )
@@ -164,6 +403,78 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ],
         );
       },
+    );
+  }
+
+  void _mostrarDialogoReporte(BuildContext context, String heladeraId) {
+    int semanas = _semanasReporte;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          backgroundColor: AppTheme.bgCard,
+          title: const Text('Solicitar reporte por email',
+              style: TextStyle(color: AppTheme.textPrimary, fontSize: 15)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Período del reporte:',
+                  style: TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [1, 2, 3, 4].map((s) {
+                  final selected = semanas == s;
+                  return GestureDetector(
+                    onTap: () => setS(() => semanas = s),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? AppTheme.tempOk.withOpacity(0.15)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: selected
+                              ? AppTheme.tempOk.withOpacity(0.5)
+                              : AppTheme.border,
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Text(
+                        s == 1 ? '1 sem' : '$s sem',
+                        style: TextStyle(
+                          color: selected ? AppTheme.tempOk : AppTheme.textSecondary,
+                          fontSize: 13,
+                          fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar',
+                  style: TextStyle(color: AppTheme.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() => _semanasReporte = semanas);
+                Navigator.pop(ctx);
+                _solicitarReporte(heladeraId);
+              },
+              child: const Text('Enviar',
+                  style: TextStyle(color: AppTheme.tempOk)),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -194,9 +505,7 @@ class _HeladeraSelector extends StatelessWidget {
   final void Function(String) onSelect;
 
   const _HeladeraSelector({
-    required this.heladeras,
-    required this.selectedId,
-    required this.onSelect,
+    required this.heladeras, required this.selectedId, required this.onSelect,
   });
 
   @override
@@ -211,8 +520,7 @@ class _HeladeraSelector extends StatelessWidget {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               margin: const EdgeInsets.only(right: 8),
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 14, vertical: 7),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
               decoration: BoxDecoration(
                 color: isSelected
                     ? AppTheme.tempOk.withOpacity(0.15)
@@ -225,18 +533,12 @@ class _HeladeraSelector extends StatelessWidget {
                   width: 0.5,
                 ),
               ),
-              child: Text(
-                h.nombre,
-                style: TextStyle(
-                  color: isSelected
-                      ? AppTheme.tempOk
-                      : AppTheme.textSecondary,
-                  fontSize: 12,
-                  fontWeight: isSelected
-                      ? FontWeight.w600
-                      : FontWeight.normal,
-                ),
-              ),
+              child: Text(h.nombre,
+                  style: TextStyle(
+                    color: isSelected ? AppTheme.tempOk : AppTheme.textSecondary,
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                  )),
             ),
           );
         }).toList(),
@@ -268,8 +570,7 @@ class _EventRow extends StatelessWidget {
       case _EventType.outOfRange:
         color = AppTheme.tempDanger;
         title = event.reading.temperatura > AppConfig.tempMax
-            ? 'Temperatura alta'
-            : 'Temperatura baja';
+            ? 'Temperatura alta' : 'Temperatura baja';
         subtitle = 'Fuera de rango';
         icon = Icons.warning_rounded;
         break;
@@ -289,9 +590,8 @@ class _EventRow extends StatelessWidget {
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        border: Border(
-            bottom: BorderSide(color: AppTheme.border, width: 0.5)),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppTheme.border, width: 0.5)),
       ),
       child: Row(
         children: [
@@ -322,8 +622,7 @@ class _EventRow extends StatelessWidget {
                       fontSize: 13, fontWeight: FontWeight.w600)),
               Text(
                 DateFormat('dd/MM HH:mm').format(event.reading.timestamp),
-                style: const TextStyle(
-                    color: AppTheme.textMuted, fontSize: 10),
+                style: const TextStyle(color: AppTheme.textMuted, fontSize: 10),
               ),
             ],
           ),
@@ -341,7 +640,7 @@ class _TimeRangeSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final options = [(1, '1h'), (6, '6h'), (12, '12h'), (24, '24h')];
+    final options = [(1, '1h'), (6, '6h'), (12, '12h'), (24, '24h'), (168, '7d')];
     return Container(
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
@@ -364,21 +663,15 @@ class _TimeRangeSelector extends StatelessWidget {
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(7),
                   border: isSelected
-                      ? Border.all(
-                          color: AppTheme.tempOk.withOpacity(0.4),
-                          width: 0.5)
+                      ? Border.all(color: AppTheme.tempOk.withOpacity(0.4), width: 0.5)
                       : null,
                 ),
                 child: Text(opt.$2,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: isSelected
-                          ? AppTheme.tempOk
-                          : AppTheme.textMuted,
-                      fontSize: 13,
-                      fontWeight: isSelected
-                          ? FontWeight.w600
-                          : FontWeight.normal,
+                      color: isSelected ? AppTheme.tempOk : AppTheme.textMuted,
+                      fontSize: 12,
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
                     )),
               ),
             ),
