@@ -20,11 +20,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _monthlyReportEnabled = true;
   final _emailController = TextEditingController();
   bool _enviandoTest = false;
+  int _pushDesconexionMin = 2;
+  int _emailDesconexionMin = 25;
 
   @override
   void initState() {
     super.initState();
     _cargarEmail();
+    _cargarTiemposAlerta();
+  }
+
+  Future<void> _cargarTiemposAlerta() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _pushDesconexionMin = prefs.getInt('push_desconexion_min') ?? 2;
+        _emailDesconexionMin = prefs.getInt('email_desconexion_min') ?? 25;
+      });
+    }
+  }
+
+  Future<void> _guardarPushMinutos(int minutos) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('push_desconexion_min', minutos);
+    setState(() => _pushDesconexionMin = minutos);
+    widget.mqtt.actualizarUmbralDesconexion(minutos);
+  }
+
+  Future<void> _guardarEmailMinutos(int minutos) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('email_desconexion_min', minutos);
+    setState(() => _emailDesconexionMin = minutos);
+    _publicarMinutosAlertaMqtt(minutos);
+  }
+
+  void _publicarMinutosAlertaMqtt(int minutos) {
+    try {
+      final topic = 'farmacias/\${AppConfig.mqttUser}/config/alerta_minutos';
+      final payload = MqttClientPayloadBuilder();
+      payload.addString(minutos.toString());
+      widget.mqtt.publishMessage(topic, payload);
+    } catch (e) {
+      debugPrint('Error publicando minutos alerta: \$e');
+    }
   }
 
   Future<void> _cargarEmail() async {
@@ -242,6 +280,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     subtitle: 'Alertas en el celular',
                     value: _pushEnabled,
                     onChanged: (v) => setState(() => _pushEnabled = v),
+                    isLast: true,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // ── Tiempos de alerta ──────────────────────
+            const Text('TIEMPOS DE ALERTA',
+                style: TextStyle(
+                    color: AppTheme.textMuted,
+                    fontSize: 10,
+                    letterSpacing: 0.1)),
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: AppTheme.bgCard,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppTheme.border, width: 0.5),
+              ),
+              child: Column(
+                children: [
+                  _MinutosSelectorRow(
+                    label: 'Notificación push',
+                    subtitle: 'Avisar si no hay datos por más de',
+                    opciones: const [2, 5, 10, 20],
+                    valorActual: _pushDesconexionMin,
+                    onSelect: _guardarPushMinutos,
+                  ),
+                  _MinutosSelectorRow(
+                    label: 'Email de alerta',
+                    subtitle: 'Enviar email si no hay datos por más de',
+                    opciones: const [15, 25, 30, 60],
+                    valorActual: _emailDesconexionMin,
+                    onSelect: _guardarEmailMinutos,
                     isLast: true,
                   ),
                 ],
@@ -705,6 +778,88 @@ class _ActionButton extends StatelessWidget {
             Icon(Icons.chevron_right_rounded, color: c.withOpacity(0.5)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _MinutosSelectorRow extends StatelessWidget {
+  final String label;
+  final String subtitle;
+  final List<int> opciones;
+  final int valorActual;
+  final void Function(int) onSelect;
+  final bool isLast;
+
+  const _MinutosSelectorRow({
+    required this.label,
+    required this.subtitle,
+    required this.opciones,
+    required this.valorActual,
+    required this.onSelect,
+    this.isLast = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        border: isLast
+            ? null
+            : const Border(
+                bottom: BorderSide(color: AppTheme.border, width: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label,
+              style: const TextStyle(
+                  color: AppTheme.textPrimary, fontSize: 13)),
+          const SizedBox(height: 2),
+          Text(subtitle,
+              style: const TextStyle(
+                  color: AppTheme.textMuted, fontSize: 11)),
+          const SizedBox(height: 10),
+          Row(
+            children: opciones.map((min) {
+              final selected = min == valorActual;
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () => onSelect(min),
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 6),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? AppTheme.tempOk.withOpacity(0.15)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: selected
+                            ? AppTheme.tempOk.withOpacity(0.5)
+                            : AppTheme.border,
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Text(
+                      '$min min',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: selected
+                            ? AppTheme.tempOk
+                            : AppTheme.textSecondary,
+                        fontSize: 12,
+                        fontWeight:
+                            selected ? FontWeight.w600 : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
       ),
     );
   }

@@ -35,8 +35,23 @@ class MqttService extends ChangeNotifier {
   }
 
   // ── Watchdog: verifica cada 30s si llegaron datos recientes ──
+  int _umbralDesconexionSeg = 120; // default 2 min, configurable
+
+  Future<void> _cargarUmbralDesconexion() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final mins = prefs.getInt('push_desconexion_min') ?? 2;
+      _umbralDesconexionSeg = mins * 60;
+    } catch (_) {}
+  }
+
+  void actualizarUmbralDesconexion(int minutos) {
+    _umbralDesconexionSeg = minutos * 60;
+  }
+
   void _startWatchdog() {
     _watchdogTimer?.cancel();
+    _cargarUmbralDesconexion();
     _watchdogTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_disposed) return;
       final ahora = DateTime.now();
@@ -45,7 +60,7 @@ class MqttService extends ChangeNotifier {
         final hs = _state.getHeladera(h.id);
         if (ultima == null || hs == null) continue;
         final diff = ahora.difference(ultima).inSeconds;
-        if (diff > 120 && hs.sensorOnline) {
+        if (diff > _umbralDesconexionSeg && hs.sensorOnline) {
           _updateHeladeraState(h.id, (s) => s.copyWith(sensorOnline: false));
           if (_wasEverOnline[h.id] == true) {
             final mins = (diff / 60).round();
@@ -53,7 +68,7 @@ class MqttService extends ChangeNotifier {
           }
           debugPrint("Watchdog: ${h.id} sin datos por ${diff}s -> offline");
         }
-        if (diff <= 120 && !hs.sensorOnline && _wasEverOnline[h.id] == true) {
+        if (diff <= _umbralDesconexionSeg && !hs.sensorOnline && _wasEverOnline[h.id] == true) {
           _updateHeladeraState(h.id, (s) => s.copyWith(sensorOnline: true));
           debugPrint("Watchdog: ${h.id} volvio online");
         }
