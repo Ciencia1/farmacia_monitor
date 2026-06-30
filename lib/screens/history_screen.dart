@@ -19,7 +19,8 @@ class HistoryScreen extends StatefulWidget {
 }
 
 class _HistoryScreenState extends State<HistoryScreen> {
-  int _hoursBack = 6;
+  // Rango fijo de historial: 48 horas (2 días). No es configurable por el usuario.
+  static const int _hoursBack = 48;
   int _semanasReporte = 1;
   String? _selectedHeladeraId;
 
@@ -38,12 +39,25 @@ class _HistoryScreenState extends State<HistoryScreen> {
     super.initState();
   }
 
+  // Se llama automáticamente al construir la pantalla (primera vez) y al
+  // cambiar de heladera, para que los datos siempre vengan del servidor
+  // sin que el usuario tenga que tocar nada.
+  void _cargarAutomaticoSiCorresponde(String heladeraId) {
+    if (!_loadingApi && !_usandoApi) {
+      // Evita reentradas durante el mismo build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_usandoApi && !_loadingApi) {
+          _cargarDesdeApi(heladeraId);
+        }
+      });
+    }
+  }
+
   Future<void> _cargarDesdeApi(String heladeraId) async {
     setState(() { _loadingApi = true; _apiError = null; });
     try {
-      final semanas = (_hoursBack / 168).ceil().clamp(1, 4);
       final uri = Uri.parse(
-        '$_apiBase/historial?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&semanas=$semanas'
+        '$_apiBase/historial?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&horas=$_hoursBack'
       );
       final res = await http.get(uri).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
@@ -58,7 +72,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
         // Stats
         final statsUri = Uri.parse(
-          '$_apiBase/estadisticas?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&semanas=$semanas'
+          '$_apiBase/estadisticas?farmacia=${AppConfig.mqttUser}&heladera=$heladeraId&horas=$_hoursBack'
         );
         final statsRes = await http.get(statsUri).timeout(const Duration(seconds: 10));
         Map<String, dynamic>? stats;
@@ -143,8 +157,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
         final selectedId = _selectedHeladeraId ?? heladeras.first.heladera.id;
         final heladeraState = widget.mqtt.state.getHeladera(selectedId) ?? heladeras.first;
 
+        // Carga automática desde el servidor: la primera vez que se entra a
+        // la pantalla y cada vez que se cambia de heladera.
+        _cargarAutomaticoSiCorresponde(selectedId);
+
         // Usar datos de API si están disponibles, sino historial local
-        final cutoff = DateTime.now().subtract(Duration(hours: _hoursBack));
+        final cutoff = DateTime.now().subtract(const Duration(hours: _hoursBack));
         final localFiltered = heladeraState.history
             .where((r) => r.timestamp.isAfter(cutoff))
             .toList();
@@ -167,32 +185,24 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     _usandoApi = false;
                     _apiReadings = [];
                     _apiStats = null;
+                    // La carga automática se dispara solita en el próximo build
+                    // (ver _cargarAutomaticoSiCorresponde), porque _usandoApi
+                    // queda en false.
                   });
                 },
               ),
               const SizedBox(height: 10),
             ],
 
-            // ── Selector de rango temporal ─────────────
-            _TimeRangeSelector(
-              selected: _hoursBack,
-              onSelect: (h) {
-                setState(() {
-                  _hoursBack = h;
-                  _usandoApi = false;
-                  _apiReadings = [];
-                  _apiStats = null;
-                });
-              },
-            ),
-            const SizedBox(height: 10),
-
             // ── Botones API y Reporte ──────────────────
             Row(
               children: [
                 Expanded(
                   child: GestureDetector(
-                    onTap: _loadingApi ? null : () => _cargarDesdeApi(selectedId),
+                    onTap: _loadingApi ? null : () {
+                      setState(() { _usandoApi = false; });
+                      _cargarDesdeApi(selectedId);
+                    },
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
@@ -218,15 +228,13 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             )
                           else
                             Icon(
-                              _usandoApi
-                                  ? Icons.cloud_done_rounded
-                                  : Icons.cloud_download_outlined,
+                              Icons.refresh_rounded,
                               color: _usandoApi ? AppTheme.tempOk : AppTheme.textSecondary,
                               size: 16,
                             ),
                           const SizedBox(width: 6),
                           Text(
-                            _usandoApi ? 'Servidor ✓' : 'Cargar servidor',
+                            'Actualizar',
                             style: TextStyle(
                               color: _usandoApi ? AppTheme.tempOk : AppTheme.textSecondary,
                               fontSize: 12,
@@ -632,52 +640,4 @@ class _EventRow extends StatelessWidget {
   }
 }
 
-class _TimeRangeSelector extends StatelessWidget {
-  final int selected;
-  final void Function(int) onSelect;
 
-  const _TimeRangeSelector({required this.selected, required this.onSelect});
-
-  @override
-  Widget build(BuildContext context) {
-    final options = [(1, '1h'), (6, '6h'), (12, '12h'), (24, '24h'), (168, '7d')];
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: AppTheme.bgCard,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppTheme.border, width: 0.5),
-      ),
-      child: Row(
-        children: options.map((opt) {
-          final isSelected = opt.$1 == selected;
-          return Expanded(
-            child: GestureDetector(
-              onTap: () => onSelect(opt.$1),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(
-                  color: isSelected
-                      ? AppTheme.tempOk.withOpacity(0.15)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(7),
-                  border: isSelected
-                      ? Border.all(color: AppTheme.tempOk.withOpacity(0.4), width: 0.5)
-                      : null,
-                ),
-                child: Text(opt.$2,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: isSelected ? AppTheme.tempOk : AppTheme.textMuted,
-                      fontSize: 12,
-                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                    )),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-}
