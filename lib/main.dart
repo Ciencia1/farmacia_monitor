@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'config.dart';
 import 'models/temp_reading.dart';
+import 'services/auth_service.dart';
 import 'services/mqtt_service.dart';
 import 'services/notification_service.dart';
+import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/history_screen.dart';
 import 'screens/settings_screen.dart';
@@ -24,30 +26,97 @@ void main() async {
   await notif.init();
   await notif.requestPermissions();
 
-  final mqtt = MqttService();
-  await mqtt.init();
-
-  runApp(FarmaciaApp(mqtt: mqtt));
+  runApp(const FarmaciaApp());
 }
 
-class FarmaciaApp extends StatelessWidget {
-  final MqttService mqtt;
-  const FarmaciaApp({super.key, required this.mqtt});
+/// Widget raíz: decide si mostrar Login o la app según haya sesión guardada.
+class FarmaciaApp extends StatefulWidget {
+  const FarmaciaApp({super.key});
+
+  @override
+  State<FarmaciaApp> createState() => _FarmaciaAppState();
+}
+
+class _FarmaciaAppState extends State<FarmaciaApp> {
+  final _authService = AuthService();
+
+  bool _checkingSession = true;
+  MqttService? _mqtt;
+
+  @override
+  void initState() {
+    super.initState();
+    _restaurarSesion();
+  }
+
+  Future<void> _restaurarSesion() async {
+    final session = await _authService.sesionGuardada();
+    if (session != null) {
+      await _iniciarSesionEnApp(session);
+    } else {
+      setState(() => _checkingSession = false);
+    }
+  }
+
+  Future<void> _iniciarSesionEnApp(FarmaciaSession session) async {
+    AppConfig.configurarSesion(
+      id: session.id,
+      nombre: session.nombre,
+      mUser: session.mqttUser,
+      mPassword: session.mqttPassword,
+      tMin: session.tempMin,
+      tMax: session.tempMax,
+    );
+
+    final mqtt = MqttService();
+    await mqtt.init(heladerasSesion: session.heladeras);
+
+    setState(() {
+      _mqtt = mqtt;
+      _checkingSession = false;
+    });
+  }
+
+  Future<void> _logout() async {
+    await _authService.logout();
+    AppConfig.limpiarSesion();
+    setState(() {
+      _mqtt?.dispose();
+      _mqtt = null;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
+    Widget home;
+    if (_checkingSession) {
+      home = const Scaffold(
+        backgroundColor: AppTheme.bgDark,
+        body: Center(
+          child: CircularProgressIndicator(color: AppTheme.tempOk),
+        ),
+      );
+    } else if (_mqtt == null) {
+      home = LoginScreen(
+        onLoginSuccess: (session) => _iniciarSesionEnApp(session),
+      );
+    } else {
+      home = MainShell(mqtt: _mqtt!, onLogout: _logout);
+    }
+
     return MaterialApp(
-      title: AppConfig.farmaciaName,
+      title: 'Farmacia Monitor',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark,
-      home: MainShell(mqtt: mqtt),
+      home: home,
     );
   }
 }
 
 class MainShell extends StatefulWidget {
   final MqttService mqtt;
-  const MainShell({super.key, required this.mqtt});
+  final VoidCallback onLogout;
+  const MainShell({super.key, required this.mqtt, required this.onLogout});
 
   @override
   State<MainShell> createState() => _MainShellState();
@@ -131,7 +200,7 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
         children: [
           HomeScreen(mqtt: widget.mqtt),
           HistoryScreen(mqtt: widget.mqtt),
-          SettingsScreen(mqtt: widget.mqtt),
+          SettingsScreen(mqtt: widget.mqtt, onLogout: widget.onLogout),
         ],
       ),
       bottomNavigationBar: Container(

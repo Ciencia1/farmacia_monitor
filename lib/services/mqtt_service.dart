@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -27,11 +28,59 @@ class MqttService extends ChangeNotifier {
   List<Heladera> get heladeras => _heladeras;
   ConnectionStatus get status => _state.connectionStatus;
 
-  Future<void> init() async {
-    await _loadHeladeras();
-    await _loadHistory();
-    await connect();
+  /// [heladerasSesion] son las heladeras que devolvió el servidor en /login.
+  /// Solo se usan para inicializar la primera vez (si no hay nada guardado
+  /// localmente todavía); si el usuario ya las editó desde Ajustes, se
+  /// respeta lo guardado en el dispositivo.
+  Future<void> init({List<Map<String, String>>? heladerasSesion}) async {
+    await _loadHeladeras(heladerasSesion: heladerasSesion);
+    // NOTA: ya no se hace fetch de /ultimos aca. HomeScreen ahora hace
+    // su propia consulta independiente al abrirse, para no bloquear la
+    // transicion de Login -> MainShell esperando esta consulta primero.
+
+    unawaited(_loadHistory());
+    // Retrasamos el intento de conexion MQTT un par de segundos: si
+    // arranca en simultaneo con el fetch HTTP de arriba, puede competir
+    // por el isolate y demorar que la UI se actualice con el valor real
+    // recien traido.
+    Future.delayed(const Duration(seconds: 2), () {
+      if (!_disposed) connect();
+    });
     _startWatchdog();
+    debugPrint('[DIAG] init() termina (UI deberia mostrarse ya): \${DateTime.now().difference(t0).inMilliseconds}ms');
+  }
+
+  static const String _apiBase = 'http://168.75.110.69:5000';
+
+  /// Consulta /ultimos (una sola vez, todas las heladeras juntas) y
+  /// precarga los últimos valores reales conocidos, así la pantalla
+  /// principal muestra algo de inmediato al abrir la app en vez de
+  /// esperar al próximo mensaje MQTT o hacer N consultas separadas.
+  Future<void> _fetchUltimosValores() async {
+    try {
+      final uri = Uri.parse('$_apiBase/ultimos?farmacia=${AppConfig.mqttUser}');
+      final res = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (res.statusCode != 200) return;
+      final data = json.decode(res.body);
+      if (data['ok'] != true) return;
+
+      final Map<String, dynamic> heladerasData = data['heladeras'] ?? {};
+      for (final h in _heladeras) {
+        final info = heladerasData[h.id];
+        if (info == null || info['temperatura'] == null) continue;
+
+        final reading = TempReading(
+          temperatura: (info['temperatura'] as num).toDouble(),
+          timestamp: DateTime.parse(info['time']).toLocal(),
+          heladeraId: h.id,
+          cliente: AppConfig.mqttUser,
+        );
+        _updateHeladeraState(h.id, (s) => s.copyWith(lastReading: reading));
+      }
+    } catch (e) {
+      // Silencioso: si falla, el valor llega igual con el próximo MQTT.
+      debugPrint('No se pudieron precargar los últimos valores: $e');
+    }
   }
 
   // ── Watchdog: verifica cada 30s si llegaron datos recientes ──
@@ -77,7 +126,8 @@ class MqttService extends ChangeNotifier {
   }
 
   // ── Gestión de heladeras ──────────────────────────────
-  Future<void> _loadHeladeras() async {
+  Future<void> _loadHeladeras(
+      {List<Map<String, String>>? heladerasSesion}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(AppConfig.prefKeyHeladeras);
@@ -85,6 +135,11 @@ class MqttService extends ChangeNotifier {
         _heladeras = (json.decode(raw) as List)
             .map((e) => Heladera.fromJson(e as Map<String, dynamic>))
             .toList();
+      } else if (heladerasSesion != null && heladerasSesion.isNotEmpty) {
+        _heladeras = heladerasSesion
+            .map((h) => Heladera(id: h['id']!, nombre: h['nombre']!))
+            .toList();
+        await _saveHeladeras();
       } else {
         _heladeras = [const Heladera(id: 'heladera1', nombre: 'Heladera 1')];
         await _saveHeladeras();
@@ -166,7 +221,7 @@ class MqttService extends ChangeNotifier {
     _setState(_state.copyWith(
         connectionStatus: ConnectionStatus.connecting, errorMessage: null));
 
-    _client = MqttServerClient(AppConfig.mqttHost, AppConfig.mqttClientId);
+    _client = MqttServerClient(AppConfig.serverHost, AppConfig.mqttClientId);
     _client.port = AppConfig.mqttPort;
     _client.keepAlivePeriod = AppConfig.keepAlivePeriod;
     _client.onDisconnected = _onDisconnected;
@@ -425,23 +480,13 @@ class MqttService extends ChangeNotifier {
           final list = (json.decode(raw) as List)
               .map((e) => TempReading.fromJson(e as Map<String, dynamic>))
               .toList();
-          // Cargar historial para la grafica pero NO mostrar temperatura
-          // ni marcar online hasta recibir datos reales
-         
-         
-   
-
-          debugPrint('ARRANQUE: ${hs.heladera.id} lastReading seteado a null');
-newStates.add(hs.copyWith(
-  history: list,
-  lastReading: null,
-  sensorOnline: false,
-  lastUpdate: null,
-));
-
-
-
-
+          // Cargar el historial para la gráfica. lastReading/sensorOnline
+          // NO se tocan acá: ya pueden venir seteados por
+          // _fetchUltimosValores() con un valor real reciente del servidor.
+          // Pisarlos con null (como se hacía antes) causaba que el valor
+          // recién cargado desapareciera un instante después, hasta que
+          // llegara el próximo mensaje MQTT.
+          newStates.add(hs.copyWith(history: list));
         } else {
           newStates.add(hs);
         }
@@ -474,4 +519,3 @@ newStates.add(hs.copyWith(
     super.dispose();
   }
 }
-

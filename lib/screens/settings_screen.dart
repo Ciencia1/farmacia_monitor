@@ -8,7 +8,8 @@ import '../theme/app_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
   final MqttService mqtt;
-  const SettingsScreen({super.key, required this.mqtt});
+  final VoidCallback? onLogout;
+  const SettingsScreen({super.key, required this.mqtt, this.onLogout});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -342,7 +343,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       valueColor: isConnected
                           ? AppTheme.tempOk
                           : AppTheme.tempDanger),
-                  _InfoRow('Servidor', AppConfig.mqttHost),
+                  _InfoRow('Servidor', AppConfig.serverHost),
                   _InfoRow('Heladeras activas', '${heladeras.length}',
                       isLast: true),
                 ],
@@ -384,6 +385,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               color: AppTheme.tempDanger,
               onTap: () => _confirmClearHistory(context),
             ),
+            if (widget.onLogout != null) ...[
+              const SizedBox(height: 8),
+              _ActionButton(
+                icon: Icons.logout_rounded,
+                label: 'Cerrar sesión',
+                color: AppTheme.tempDanger,
+                onTap: () => _confirmLogout(context),
+              ),
+            ],
             const SizedBox(height: 24),
 
             const Center(
@@ -548,6 +558,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         );
       }
+    }
+  }
+
+  void _confirmLogout(BuildContext context) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgCard,
+        title: const Text('Cerrar sesión',
+            style: TextStyle(color: AppTheme.textPrimary)),
+        content: const Text(
+            '¿Seguro que querés cerrar sesión? Vas a tener que volver a ingresar tu email y contraseña.',
+            style: TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar',
+                style: TextStyle(color: AppTheme.textSecondary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cerrar sesión',
+                style: TextStyle(color: AppTheme.tempDanger)),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      widget.onLogout?.call();
     }
   }
 }

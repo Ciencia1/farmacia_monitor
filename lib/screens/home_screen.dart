@@ -1,20 +1,68 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import '../models/temp_reading.dart';
 import '../services/mqtt_service.dart';
 import '../theme/app_theme.dart';
 import '../config.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   final MqttService mqtt;
   const HomeScreen({super.key, required this.mqtt});
 
   @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const String _apiBase = 'http://168.75.110.69:5000';
+
+  /// Último valor conocido por consulta HTTP directa, independiente de
+  /// MqttService. Se usa solo mientras MQTT todavía no trajo nada (hs.
+  /// lastReading == null); apenas MQTT entrega un dato real, ese pasa a
+  /// mandar y esto queda de lado.
+  final Map<String, TempReading> _prefetch = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchInicial();
+  }
+
+  Future<void> _fetchInicial() async {
+    try {
+      final uri =
+          Uri.parse('$_apiBase/ultimos?farmacia=${AppConfig.mqttUser}');
+      final res = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return;
+      final data = json.decode(res.body);
+      if (data['ok'] != true) return;
+
+      final Map<String, dynamic> heladerasData = data['heladeras'] ?? {};
+      final nuevos = <String, TempReading>{};
+      heladerasData.forEach((hid, info) {
+        if (info == null || info['temperatura'] == null) return;
+        nuevos[hid] = TempReading(
+          temperatura: (info['temperatura'] as num).toDouble(),
+          timestamp: DateTime.parse(info['time']).toLocal(),
+          heladeraId: hid,
+          cliente: AppConfig.mqttUser,
+        );
+      });
+
+      if (mounted) setState(() => _prefetch.addAll(nuevos));
+    } catch (e) {
+      debugPrint('HomeScreen: no se pudo precargar /ultimos: $e');
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: mqtt,
+      animation: widget.mqtt,
       builder: (context, _) {
-        final heladeras = mqtt.state.heladeras;
+        final heladeras = widget.mqtt.state.heladeras;
 
         if (heladeras.isEmpty) {
           return Center(
@@ -37,12 +85,23 @@ class HomeScreen extends StatelessWidget {
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-          children: heladeras
-              .map((hs) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: _HeladeraCard(heladeraState: hs),
-                  ))
-              .toList(),
+          children: heladeras.map((hs) {
+            // Si MQTT todavía no trajo nada para esta heladera, usamos
+            // el valor precargado por HTTP (si lo tenemos) para mostrar
+            // algo real de inmediato en vez de esperar.
+            final hsEfectivo = hs.lastReading == null &&
+                    _prefetch.containsKey(hs.heladera.id)
+                ? hs.copyWith(
+                    lastReading: _prefetch[hs.heladera.id],
+                    sensorOnline: true,
+                  )
+                : hs;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _HeladeraCard(heladeraState: hsEfectivo),
+            );
+          }).toList(),
         );
       },
     );
@@ -89,7 +148,6 @@ class _HeladeraCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Header con nombre y estado del sensor ────
           Row(
             children: [
               Icon(Icons.kitchen_rounded,
@@ -106,19 +164,16 @@ class _HeladeraCard extends StatelessWidget {
                   ),
                 ),
               ),
-              // Indicador de estado del sensor
               _SensorIndicator(online: sensorOnline),
             ],
           ),
           const SizedBox(height: 14),
 
-          // ── Temperatura ──────────────────────────────
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               Icon(icon, color: color, size: 28),
               const SizedBox(width: 10),
-              // Si offline mostrar guiones, si online mostrar temp
               sensorOnline && temp != null
                   ? RichText(
                       text: TextSpan(children: [
@@ -160,14 +215,12 @@ class _HeladeraCard extends StatelessWidget {
                       ],
                     ),
               const Spacer(),
-              // Batería
               if (deviceStatus != null && sensorOnline)
                 _BatteryBadge(level: deviceStatus.batteryLevel),
             ],
           ),
           const SizedBox(height: 10),
 
-          // ── Status pill ──────────────────────────────
           Container(
             padding:
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -187,7 +240,6 @@ class _HeladeraCard extends StatelessWidget {
             ),
           ),
 
-          // ── Última lectura ───────────────────────────
           if (heladeraState.lastUpdate != null) ...[
             const SizedBox(height: 8),
             Text(
@@ -208,7 +260,6 @@ class _HeladeraCard extends StatelessWidget {
   }
 }
 
-// ── Indicador de estado del sensor ───────────────────
 class _SensorIndicator extends StatelessWidget {
   final bool online;
   const _SensorIndicator({required this.online});
