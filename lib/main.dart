@@ -4,7 +4,9 @@ import 'config.dart';
 import 'models/temp_reading.dart';
 import 'services/auth_service.dart';
 import 'services/mqtt_service.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'services/notification_service.dart';
+import 'services/push_notification_service.dart';
 import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/history_screen.dart';
@@ -25,6 +27,9 @@ void main() async {
   final notif = NotificationService();
   await notif.init();
   await notif.requestPermissions();
+
+  await Firebase.initializeApp();
+  await PushNotificationService().init();
 
   runApp(const FarmaciaApp());
 }
@@ -70,6 +75,17 @@ class _FarmaciaAppState extends State<FarmaciaApp> {
 
     final mqtt = MqttService();
     await mqtt.init(heladerasSesion: session.heladeras);
+
+    // Enviar el token FCM actual (si ya se genero) y suscribirse a
+    // renovaciones futuras, para que el servidor siempre tenga el
+    // token vigente de este dispositivo.
+    final pushToken = PushNotificationService().token;
+    if (pushToken != null) {
+      _authService.enviarFcmToken(pushToken);
+    }
+    PushNotificationService().onTokenChanged = (nuevoToken) {
+      _authService.enviarFcmToken(nuevoToken);
+    };
 
     setState(() {
       _mqtt = mqtt;
@@ -166,51 +182,148 @@ class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(AppConfig.farmaciaName,
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600)),
-            const Text('Monitoreo de temperatura',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: AppTheme.textMuted,
-                    fontWeight: FontWeight.normal)),
-          ],
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 14),
-            child: AnimatedBuilder(
-              animation: widget.mqtt,
-              builder: (context, _) => ConnectionBadge(
-                label: widget.mqtt.connectionLabel,
-                connected: widget.mqtt.status == ConnectionStatus.connected,
+    return AnimatedBuilder(
+      animation: widget.mqtt,
+      builder: (context, _) {
+        final heladeras = widget.mqtt.state.heladeras;
+        final bloqueada = heladeras.any((hs) => hs.estadoPago == 'bloqueado');
+        final recordatorio =
+            heladeras.where((hs) => hs.estadoPago == 'recordatorio').toList();
+
+        if (bloqueada) {
+          return PaymentBlockedScreen(onLogout: widget.onLogout);
+        }
+
+        return Scaffold(
+          appBar: AppBar(
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(AppConfig.farmaciaName,
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+                const Text('Monitoreo de temperatura',
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.textMuted,
+                        fontWeight: FontWeight.normal)),
+              ],
+            ),
+            actions: [
+              Padding(
+                padding: const EdgeInsets.only(right: 14),
+                child: ConnectionBadge(
+                  label: widget.mqtt.connectionLabel,
+                  connected: widget.mqtt.status == ConnectionStatus.connected,
+                ),
               ),
+            ],
+          ),
+          body: Column(
+            children: [
+              if (recordatorio.isNotEmpty)
+                _RecordatorioPagoBanner(diasMora: recordatorio.first.diasMora ?? 0),
+              Expanded(
+                child: PageView(
+                  controller: _pageController,
+                  onPageChanged: (i) => setState(() => _tab = i),
+                  children: [
+                    HomeScreen(mqtt: widget.mqtt),
+                    HistoryScreen(mqtt: widget.mqtt),
+                    SettingsScreen(mqtt: widget.mqtt, onLogout: widget.onLogout),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          bottomNavigationBar: Container(
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: AppTheme.border, width: 0.5)),
+            ),
+            child: BottomNavigationBar(
+              currentIndex: _tab,
+              onTap: _onTabTapped,
+              items: _navItems,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RecordatorioPagoBanner extends StatelessWidget {
+  final int diasMora;
+  const _RecordatorioPagoBanner({required this.diasMora});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      color: AppTheme.tempWarn.withOpacity(0.15),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded,
+              color: AppTheme.tempWarn, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Pago pendiente ($diasMora días de mora). Regularizá para evitar el corte del servicio.',
+              style: const TextStyle(
+                  color: AppTheme.tempWarn,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500),
             ),
           ),
         ],
       ),
-      body: PageView(
-        controller: _pageController,
-        onPageChanged: (i) => setState(() => _tab = i),
-        children: [
-          HomeScreen(mqtt: widget.mqtt),
-          HistoryScreen(mqtt: widget.mqtt),
-          SettingsScreen(mqtt: widget.mqtt, onLogout: widget.onLogout),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          border: Border(top: BorderSide(color: AppTheme.border, width: 0.5)),
-        ),
-        child: BottomNavigationBar(
-          currentIndex: _tab,
-          onTap: _onTabTapped,
-          items: _navItems,
+    );
+  }
+}
+
+class PaymentBlockedScreen extends StatelessWidget {
+  final VoidCallback onLogout;
+  const PaymentBlockedScreen({super.key, required this.onLogout});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.bgDark,
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.lock_outline_rounded,
+                    size: 64, color: AppTheme.tempDanger),
+                const SizedBox(height: 20),
+                const Text(
+                  'Servicio suspendido',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Tu suscripción está vencida. Contactanos para reactivar el monitoreo de temperatura.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                ),
+                const SizedBox(height: 28),
+                TextButton(
+                  onPressed: onLogout,
+                  child: const Text('Cerrar sesión',
+                      style: TextStyle(color: AppTheme.textMuted)),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

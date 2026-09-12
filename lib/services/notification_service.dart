@@ -95,6 +95,38 @@ class NotificationService {
     );
   }
 
+  Future<void> showGenericAlert(String titulo, String cuerpo) async {
+    await _plugin.show(
+      99,
+      titulo,
+      cuerpo,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'farmacia_alerts', 'Alertas de Temperatura',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+        ),
+      ),
+    );
+  }
+
+  Future<void> showDeviceDisconnectedImmediate(String heladeraName) async {
+    await _plugin.show(
+      3,
+      '📡 Sin señal — $heladeraName',
+      'El dispositivo perdió la conexión. Verificar equipo.',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'farmacia_alerts', 'Alertas de Temperatura',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+        ),
+      ),
+    );
+  }
+
   Future<void> showDeviceDisconnected(String heladeraName) async {
     await _plugin.show(
       3,

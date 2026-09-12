@@ -43,6 +43,8 @@ class AppConfig {
       'farmacias/$farmaciaId/$id/status';
   static String topicOnline(String id) =>
       'farmacias/$farmaciaId/$id/online';
+  static String topicEstadoPago(String id) =>
+      'farmacias/$farmaciaId/$id/config/estado_pago';
 
   // ── Umbrales fijos de UI (no cambian por farmacia) ─────
   static const double tempWarnThreshold = 7.5;

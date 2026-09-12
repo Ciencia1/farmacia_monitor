@@ -1,4 +1,4 @@
-package com.example.farmacia_monitor
+package com.vigilanciatermica.app
 
 import io.flutter.embedding.android.FlutterActivity
 

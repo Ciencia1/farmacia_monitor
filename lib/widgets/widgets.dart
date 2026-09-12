@@ -105,9 +105,52 @@ class TempHistoryChart extends StatelessWidget {
       );
     }
 
-    final pts = readings.length > 60
-        ? readings.sublist(readings.length - 60)
-        : readings;
+    // Muestreamos por franjas de tiempo iguales a lo largo de TODO el
+    // rango de 'readings' (no solo los ultimos puntos), y de cada franja
+    // priorizamos el valor mas extremo (el que mas se aleja del rango
+    // normal), no uno al azar. Asi cualquier pico o valle real queda
+    // garantizado en el grafico, coincidiendo siempre con lo que dice
+    // el registro de eventos (que usa los datos crudos completos).
+    List<TempReading> pts;
+    const maxPuntos = 120;
+    if (readings.length <= maxPuntos) {
+      pts = readings;
+    } else {
+      final inicio = readings.first.timestamp;
+      final fin = readings.last.timestamp;
+      final duracionTotal = fin.difference(inicio).inMilliseconds;
+      final duracionFranja = duracionTotal / maxPuntos;
+
+      double severidad(TempReading r) {
+        if (r.temperatura > AppConfig.tempMax) {
+          return r.temperatura - AppConfig.tempMax;
+        }
+        if (r.temperatura < AppConfig.tempMin) {
+          return AppConfig.tempMin - r.temperatura;
+        }
+        return 0;
+      }
+
+      final seleccionados = <TempReading>[];
+      int idx = 0;
+      for (int franja = 0; franja < maxPuntos; franja++) {
+        final desde = inicio.add(
+            Duration(milliseconds: (franja * duracionFranja).round()));
+        final hasta = inicio.add(
+            Duration(milliseconds: ((franja + 1) * duracionFranja).round()));
+
+        TempReading? mejor;
+        while (idx < readings.length &&
+            (readings[idx].timestamp.isBefore(hasta) || franja == maxPuntos - 1)) {
+          final r = readings[idx];
+          if (r.timestamp.isBefore(desde)) { idx++; continue; }
+          if (mejor == null || severidad(r) > severidad(mejor)) mejor = r;
+          idx++;
+        }
+        if (mejor != null) seleccionados.add(mejor);
+      }
+      pts = seleccionados.isEmpty ? readings : seleccionados;
+    }
 
     final spots = pts.asMap().entries
         .map((e) => FlSpot(e.key.toDouble(), e.value.temperatura))

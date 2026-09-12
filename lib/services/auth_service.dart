@@ -50,7 +50,7 @@ class FarmaciaSession {
 }
 
 class AuthService {
-  static const String _baseUrl = 'http://168.75.110.69:5000';
+  static const String _baseUrl = 'https://vigilanciatermica.duckdns.org';
   static const String _keyToken = 'auth_token';
   static const String _keySession = 'auth_session';
 
@@ -102,5 +102,25 @@ class AuthService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_keyToken);
     await prefs.remove(_keySession);
+  }
+
+  /// Manda el token FCM (notificaciones push) al servidor, asociado a la
+  /// farmacia logueada. Se llama despues del login y cuando el token
+  /// cambia (FCM a veces lo renueva).
+  Future<void> enviarFcmToken(String fcmToken) async {
+    final token = await this.token();
+    if (token == null) return;
+    try {
+      await http.post(
+        Uri.parse('$_baseUrl/api/mi/fcm_token'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: json.encode({'token': fcmToken}),
+      ).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      // Silencioso: si falla, no es critico, se reintenta en el proximo login.
+    }
   }
 }

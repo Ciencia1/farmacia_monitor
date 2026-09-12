@@ -30,7 +30,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   bool _enviandoReporte = false;
   int _semanasReporte = 1;
 
-  static const String _apiBase = 'http://168.75.110.69:5000';
+  static const String _apiBase = 'https://vigilanciatermica.duckdns.org';
 
   @override
   void initState() {
@@ -53,7 +53,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
         '&heladera=$heladeraId&horas=$_horas'
       );
       final res = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (res.statusCode == 402) {
+        final data = json.decode(res.body);
+        widget.mqtt.marcarComoSuspendido(data['mensaje'] as String?);
+        setState(() { _loading = false; });
+        return;
+      }
       if (res.statusCode != 200) throw Exception('Error ${res.statusCode}');
+      widget.mqtt.limpiarSuspension();
 
       final data = json.decode(res.body);
       final readings = (data['datos'] as List).map((d) => TempReading(

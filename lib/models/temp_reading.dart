@@ -128,6 +128,21 @@ class SensorOnlineStatus {
   }
 }
 
+class EstadoPago {
+  final String estado; // 'al_dia' | 'recordatorio' | 'bloqueado'
+  final int diasMora;
+
+  const EstadoPago({required this.estado, required this.diasMora});
+
+  factory EstadoPago.fromMqttPayload(String payload) {
+    final map = json.decode(payload) as Map<String, dynamic>;
+    return EstadoPago(
+      estado: map['estado'] as String? ?? 'al_dia',
+      diasMora: (map['dias_mora'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+
 // Sentinel para distinguir null explícito de "no cambiar"
 const _sentinel = Object();
 
@@ -138,6 +153,8 @@ class HeladeraState {
   final DeviceStatus? deviceStatus;
   final DateTime? lastUpdate;
   final bool sensorOnline;
+  final String estadoPago; // 'al_dia' | 'recordatorio' | 'bloqueado'
+  final int? diasMora;
 
   const HeladeraState({
     required this.heladera,
@@ -146,6 +163,8 @@ class HeladeraState {
     this.deviceStatus,
     this.lastUpdate,
     this.sensorOnline = false,
+    this.estadoPago = 'al_dia',
+    this.diasMora,
   });
 
   HeladeraState copyWith({
@@ -154,6 +173,8 @@ class HeladeraState {
     Object? deviceStatus = _sentinel,
     Object? lastUpdate = _sentinel,
     bool? sensorOnline,
+    String? estadoPago,
+    Object? diasMora = _sentinel,
   }) =>
       HeladeraState(
         heladera: heladera,
@@ -162,6 +183,8 @@ class HeladeraState {
         deviceStatus: deviceStatus == _sentinel ? this.deviceStatus : deviceStatus as DeviceStatus?,
         lastUpdate: lastUpdate == _sentinel ? this.lastUpdate : lastUpdate as DateTime?,
         sensorOnline: sensorOnline ?? this.sensorOnline,
+        estadoPago: estadoPago ?? this.estadoPago,
+        diasMora: diasMora == _sentinel ? this.diasMora : diasMora as int?,
       );
 }
 

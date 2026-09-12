@@ -4,6 +4,7 @@ import 'package:mqtt_client/mqtt_client.dart';
 import '../config.dart';
 import '../models/temp_reading.dart';
 import '../services/mqtt_service.dart';
+import '../services/push_notification_service.dart';
 import '../theme/app_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -344,6 +345,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ? AppTheme.tempOk
                           : AppTheme.tempDanger),
                   _InfoRow('Servidor', AppConfig.serverHost),
+                  _InfoRow(
+                    'FCM Token (temporal, debug)',
+                    PushNotificationService().token != null
+                        ? '${PushNotificationService().token!.substring(0, 30)}...'
+                        : 'AUN NO GENERADO',
+                  ),
                   _InfoRow('Heladeras activas', '${heladeras.length}',
                       isLast: true),
                 ],

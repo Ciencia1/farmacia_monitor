@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -16,18 +17,30 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  static const String _apiBase = 'http://168.75.110.69:5000';
+  static const String _apiBase = 'https://vigilanciatermica.duckdns.org';
 
   /// Último valor conocido por consulta HTTP directa, independiente de
   /// MqttService. Se usa solo mientras MQTT todavía no trajo nada (hs.
   /// lastReading == null); apenas MQTT entrega un dato real, ese pasa a
   /// mandar y esto queda de lado.
   final Map<String, TempReading> _prefetch = {};
+  Timer? _staleCheckTimer;
 
   @override
   void initState() {
     super.initState();
     _fetchInicial();
+    // Revisa cada 30s si el valor precargado (sin MQTT en vivo) ya quedo
+    // viejo, para pasar a "Sin senal" aunque no haya llegado nada nuevo.
+    _staleCheckTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _staleCheckTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _fetchInicial() async {
@@ -35,7 +48,13 @@ class _HomeScreenState extends State<HomeScreen> {
       final uri =
           Uri.parse('$_apiBase/ultimos?farmacia=${AppConfig.mqttUser}');
       final res = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (res.statusCode == 402) {
+        final data = json.decode(res.body);
+        widget.mqtt.marcarComoSuspendido(data['mensaje'] as String?);
+        return;
+      }
       if (res.statusCode != 200) return;
+      widget.mqtt.limpiarSuspension();
       final data = json.decode(res.body);
       if (data['ok'] != true) return;
 
@@ -89,11 +108,14 @@ class _HomeScreenState extends State<HomeScreen> {
             // Si MQTT todavía no trajo nada para esta heladera, usamos
             // el valor precargado por HTTP (si lo tenemos) para mostrar
             // algo real de inmediato en vez de esperar.
-            final hsEfectivo = hs.lastReading == null &&
-                    _prefetch.containsKey(hs.heladera.id)
+            final prefetched = _prefetch[hs.heladera.id];
+            final hsEfectivo = hs.lastReading == null && prefetched != null
                 ? hs.copyWith(
-                    lastReading: _prefetch[hs.heladera.id],
-                    sensorOnline: true,
+                    lastReading: prefetched,
+                    sensorOnline: DateTime.now()
+                            .difference(prefetched.timestamp)
+                            .inSeconds <=
+                        widget.mqtt.umbralDesconexionSeg,
                   )
                 : hs;
 

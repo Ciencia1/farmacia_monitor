@@ -2,9 +2,10 @@ plugins {
     id "com.android.application"
     id "kotlin-android"
     id "dev.flutter.flutter-gradle-plugin"
+    id "com.google.gms.google-services"
 }
 android {
-    namespace = "com.example.farmacia_monitor"
+    namespace = "com.vigilanciatermica.app"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
     compileOptions {
@@ -16,7 +17,7 @@ android {
         jvmTarget = JavaVersion.VERSION_1_8
     }
     defaultConfig {
-        applicationId = "com.example.farmacia_monitor"
+        applicationId = "com.vigilanciatermica.app"
         minSdkVersion = flutter.minSdkVersion
         targetSdk = 35
         versionCode = flutter.versionCode

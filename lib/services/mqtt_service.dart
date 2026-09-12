@@ -24,6 +24,28 @@ class MqttService extends ChangeNotifier {
   bool _disposed = false;
   bool _mqttConnected = false;
 
+  // ── Estado de suspensión por falta de pago ──────────────
+  bool servicioSuspendido = false;
+  String? mensajeSuspension;
+
+  /// Llamado desde cualquier consulta HTTP (de este servicio o de las
+  /// pantallas) que reciba un 402 del servidor.
+  void marcarComoSuspendido(String? mensaje) {
+    if (servicioSuspendido && mensajeSuspension == mensaje) return; // sin cambios
+    servicioSuspendido = true;
+    mensajeSuspension = mensaje ?? 'Servicio suspendido por falta de pago.';
+    notifyListeners();
+  }
+
+  /// Llamado cuando una consulta vuelve a responder 200 normalmente,
+  /// para salir del estado de suspensión (ej. después de marcar el pago).
+  void limpiarSuspension() {
+    if (!servicioSuspendido) return;
+    servicioSuspendido = false;
+    mensajeSuspension = null;
+    notifyListeners();
+  }
+
   AppState get state => _state;
   List<Heladera> get heladeras => _heladeras;
   ConnectionStatus get status => _state.connectionStatus;
@@ -38,6 +60,7 @@ class MqttService extends ChangeNotifier {
     // su propia consulta independiente al abrirse, para no bloquear la
     // transicion de Login -> MainShell esperando esta consulta primero.
 
+    unawaited(_verificarEstadoServicio()); // chequeo rapido, en paralelo
     unawaited(_loadHistory());
     // Retrasamos el intento de conexion MQTT un par de segundos: si
     // arranca en simultaneo con el fetch HTTP de arriba, puede competir
@@ -50,7 +73,7 @@ class MqttService extends ChangeNotifier {
     debugPrint('[DIAG] init() termina (UI deberia mostrarse ya): \${DateTime.now().difference(t0).inMilliseconds}ms');
   }
 
-  static const String _apiBase = 'http://168.75.110.69:5000';
+  static const String _apiBase = 'https://vigilanciatermica.duckdns.org';
 
   /// Consulta /ultimos (una sola vez, todas las heladeras juntas) y
   /// precarga los últimos valores reales conocidos, así la pantalla
@@ -60,7 +83,13 @@ class MqttService extends ChangeNotifier {
     try {
       final uri = Uri.parse('$_apiBase/ultimos?farmacia=${AppConfig.mqttUser}');
       final res = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (res.statusCode == 402) {
+        final data = json.decode(res.body);
+        marcarComoSuspendido(data['mensaje'] as String?);
+        return;
+      }
       if (res.statusCode != 200) return;
+      limpiarSuspension();
       final data = json.decode(res.body);
       if (data['ok'] != true) return;
 
@@ -85,6 +114,7 @@ class MqttService extends ChangeNotifier {
 
   // ── Watchdog: verifica cada 30s si llegaron datos recientes ──
   int _umbralDesconexionSeg = 120; // default 2 min, configurable
+  int get umbralDesconexionSeg => _umbralDesconexionSeg;
 
   Future<void> _cargarUmbralDesconexion() async {
     try {
@@ -98,11 +128,50 @@ class MqttService extends ChangeNotifier {
     _umbralDesconexionSeg = minutos * 60;
   }
 
+  /// Chequeo liviano de si el servicio sigue habilitado. Reutiliza
+  /// /ultimo (una sola heladera alcanza, no hace falta consultar todas)
+  /// solo para leer el status code; no nos interesa el valor en sí acá,
+  /// eso ya lo trae el MQTT en vivo.
+  /// Wrapper público: permite forzar una reverificación manual (ej. desde
+  /// el botón "Ya regularicé, reintentar" de la pantalla de suspensión),
+  /// sin esperar a que pase el próximo ciclo del watchdog.
+  Future<void> reverificarEstadoServicio() => _verificarEstadoServicio();
+
+  Future<void> _verificarEstadoServicio() async {
+    if (_heladeras.isEmpty) return;
+    try {
+      final uri = Uri.parse(
+          '$_apiBase/ultimo?farmacia=${AppConfig.mqttUser}&heladera=${_heladeras.first.id}');
+      final res = await http.get(uri).timeout(const Duration(seconds: 8));
+      if (res.statusCode == 402) {
+        final data = json.decode(res.body);
+        marcarComoSuspendido(data['mensaje'] as String?);
+      } else if (res.statusCode == 200) {
+        limpiarSuspension();
+      }
+      // Otros códigos (ej. 500, timeout): no tocamos el estado de
+      // suspensión, puede ser un problema de red pasajero, no de pago.
+    } catch (_) {
+      // sin conexión: tampoco tocamos el estado, para no mostrar el
+      // cartel de suspendido por un simple corte de internet momentáneo
+    }
+  }
+
   void _startWatchdog() {
     _watchdogTimer?.cancel();
     _cargarUmbralDesconexion();
+    int ticks = 0;
     _watchdogTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_disposed) return;
+
+      // Cada 4 ticks (~2 min) revisamos si el servicio sigue habilitado.
+      // No hace falta más seguido: si se bloquea, no es una emergencia
+      // de temperatura, y así no generamos tráfico HTTP de más.
+      ticks++;
+      if (ticks % 4 == 0) {
+        _verificarEstadoServicio();
+      }
+
       final ahora = DateTime.now();
       for (final h in _heladeras) {
         final ultima = _lastDataTime[h.id];
@@ -182,6 +251,7 @@ class MqttService extends ChangeNotifier {
       _client.subscribe(AppConfig.topicTemperatura(newId), MqttQos.atLeastOnce);
       _client.subscribe(AppConfig.topicStatus(newId), MqttQos.atLeastOnce);
       _client.subscribe(AppConfig.topicOnline(newId), MqttQos.atLeastOnce);
+      _client.subscribe(AppConfig.topicEstadoPago(newId), MqttQos.atLeastOnce);
     }
   }
 
@@ -253,6 +323,7 @@ class MqttService extends ChangeNotifier {
       _client.subscribe(AppConfig.topicTemperatura(h.id), MqttQos.atLeastOnce);
       _client.subscribe(AppConfig.topicStatus(h.id), MqttQos.atLeastOnce);
       _client.subscribe(AppConfig.topicOnline(h.id), MqttQos.atLeastOnce);
+      _client.subscribe(AppConfig.topicEstadoPago(h.id), MqttQos.atLeastOnce);
     }
 
     _client.updates?.listen((messages) {
@@ -275,6 +346,9 @@ class MqttService extends ChangeNotifier {
       }
       if (topic == AppConfig.topicOnline(h.id)) {
         _processOnline(raw, h.id); return;
+      }
+      if (topic == AppConfig.topicEstadoPago(h.id)) {
+        _processEstadoPago(raw, h.id); return;
       }
     }
   }
@@ -354,6 +428,21 @@ class MqttService extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint('Error procesando online: $e');
+    }
+  }
+
+  // ── Procesar estado de pago ────────────────────
+  void _processEstadoPago(String raw, String heladeraId) {
+    try {
+      final ep = EstadoPago.fromMqttPayload(raw);
+      _updateHeladeraState(
+          heladeraId,
+          (hs) => hs.copyWith(
+                estadoPago: ep.estado,
+                diasMora: ep.diasMora,
+              ));
+    } catch (e) {
+      debugPrint('Error procesando estado de pago: $e');
     }
   }
 
